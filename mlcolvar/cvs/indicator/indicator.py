@@ -1,6 +1,7 @@
 from mlcolvar.cvs import BaseCV
 from mlcolvar.core import FeedForward
-from mlcolvar.core.loss.generator_loss import GeneratorLoss, compute_eigenfunctions
+from mlcolvar.core.loss.generator_loss import GeneratorLoss
+from mlcolvar.cvs.generator import compute_eigenfunctions
 import lightning
 import torch
 
