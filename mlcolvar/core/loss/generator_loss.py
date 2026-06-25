@@ -65,10 +65,17 @@ class GeneratorLoss(torch.nn.Module):
                 ref_idx : torch.Tensor = None
                 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         
+        # Backward compatibility: in some call sites the 4th positional argument
+        # is a per-batch derivatives tensor, not ref_idx.
+        descriptors_derivatives = self.descriptors_derivatives
+        if isinstance(ref_idx, torch.Tensor) and ref_idx.ndim > 1:
+            descriptors_derivatives = ref_idx
+            ref_idx = None
+
         # preload descriptors matrix on device
-        if isinstance(self.descriptors_derivatives, torch.Tensor):
-            if self.descriptors_derivatives.device != input.device:
-                self.descriptors_derivatives = self.descriptors_derivatives.to(input.device)
+        if isinstance(descriptors_derivatives, torch.Tensor):
+            if descriptors_derivatives.device != input.device:
+                descriptors_derivatives = descriptors_derivatives.to(input.device)
 
         return generator_loss(input=input,
                               output=output,
@@ -77,7 +84,7 @@ class GeneratorLoss(torch.nn.Module):
                               alpha=self.alpha,
                               friction=self.friction,
                               lambdas=self.lambdas,
-                              descriptors_derivatives=self.descriptors_derivatives,
+                              descriptors_derivatives=descriptors_derivatives,
                               ref_idx=ref_idx,
                               n_dim=self.n_dim,
                               u_stat=self.u_stat
@@ -146,9 +153,6 @@ def generator_loss(input : torch.Tensor,
     Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         Total loss, eigenfunctions loss, orthonormality loss 
     """    
-    if descriptors_derivatives is not None and ref_idx is None:
-        raise ValueError ("Descriptors derivatives need reference indeces from the dataset! Use a dataset with the ref_idx, see docstrign for details")
-
     # ------------------------ SETUP ------------------------
     # get correct device
     device = input.device
@@ -160,9 +164,6 @@ def generator_loss(input : torch.Tensor,
     # get number of outputs and sample sizes
     r = output.shape[1]
     sample_size = output.shape[0] // 2
-
-    # expand friction tensor
-    friction = friction.repeat_interleave(n_dim) 
 
     # ------------------------ GRADIENTS ------------------------    
     # compute gradients of output wrt to the input iterating on the outputs
@@ -183,9 +184,17 @@ def generator_loss(input : torch.Tensor,
     # --> If we directly pass the matrix d_desc/d_pos
     elif isinstance(descriptors_derivatives, torch.Tensor): 
         descriptors_derivatives = descriptors_derivatives.to(device)
-        gradient_positions = torch.einsum("bdo,badx->baxo", gradient, descriptors_derivatives[ref_idx]).contiguous()
+
+        # Support both full-dataset derivatives (indexed by ref_idx) and
+        # per-batch derivatives already aligned with the current batch.
+        if ref_idx is None:
+            deriv_batch = descriptors_derivatives
+        else:
+            deriv_batch = descriptors_derivatives[ref_idx]
+
+        gradient_positions = torch.einsum("bdo,badx->baxo", gradient, deriv_batch).contiguous()
         gradient_positions = gradient_positions.view(input.shape[0],  # number of entries
-                                                        descriptors_derivatives.shape[1] * 3, # number of atoms * 3 
+                                                        deriv_batch.shape[1] * n_dim, # number of atoms * n_dim
                                                         output.shape[-1] # number of outputs
                                                         )
         
@@ -193,15 +202,23 @@ def generator_loss(input : torch.Tensor,
     else:
         gradient_positions = gradient 
 
-
-    if r==1:
-        gradient_positions = gradient_positions.unsqueeze(-1)
-
     # this is to make the following computation easier to write
     gradient_positions = gradient_positions.transpose(2,1).contiguous()
+
+    # Match friction dimensionality with flattened positional dofs.
+    n_dofs = gradient_positions.shape[-1]
+    if friction.numel() == n_dofs:
+        friction_expanded = friction
+    elif friction.numel() * n_dim == n_dofs:
+        friction_expanded = friction.repeat_interleave(n_dim)
+    else:
+        raise RuntimeError(
+            f"Incompatible friction shape: got {friction.numel()} entries for {n_dofs} positional dofs."
+        )
+
     # multiply by friction
     try:
-        gradient_positions = gradient_positions * torch.sqrt(friction)
+        gradient_positions = gradient_positions * torch.sqrt(friction_expanded)
     except RuntimeError as e:
         raise RuntimeError(e, """[HINT]: Is you system in 3 dimension? By default the code assumes so, if it's not the case change the n_dim key to the right dimensionality.""")
 
