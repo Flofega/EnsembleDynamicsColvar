@@ -3,7 +3,7 @@ import torch
 from mlcolvar.core.transform import Transform
 from mlcolvar.core.transform.tools.utils import easy_KDE
 
-__all__ = ["ContinuousHistogram"]
+__all__ = ["ContinuousHistogram", "LogHistogram"]
 
 class ContinuousHistogram(Transform):
     """
