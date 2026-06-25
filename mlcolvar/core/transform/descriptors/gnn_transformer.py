@@ -7,7 +7,7 @@ from mlcolvar.core.transform.descriptors.utils import sanitize_positions_shape
 import lightning
 
 
-__all__ = ["GNNTransformerDescriptor"]
+__all__ = ["GNNTransformerDescriptor", "LightningGNNTransformer"]
 # Graph Transformer Convolutional layer
 class TransGCL(nn.Module):
     def __init__(self, hidden_nf: int, n_heads: int, act_fn=nn.ReLU()):
