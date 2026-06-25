@@ -3,6 +3,8 @@ from torch import nn
 import copy
 from mlcolvar.cvs.indicator import IndicatorProduction
 
+__all__ = ["IndicatorBiasModel"]
+
 class IndicatorBiasModel(torch.nn.Module):
     """Gradient-norm-based bias model for estimating the PLUMED LAMBDA parameter.
 
