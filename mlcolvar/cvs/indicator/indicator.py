@@ -12,7 +12,7 @@ class IndicatorTraining(BaseCV, lightning.LightningModule):
         We obtain this indicator from the Generator framework, learning only the first eigenfunction of the Fokker-Planck operator.
     """
 
-    BLOCKS = ["nn"]
+    DEFAULT_BLOCKS = ["nn"]
 
     def __init__(self, layers, eta, alpha=20, friction=None, options=None, **kwargs):
         """Initialize and Indicator for training.
@@ -30,8 +30,8 @@ class IndicatorTraining(BaseCV, lightning.LightningModule):
         options : dict, optional
             Additional options for the neural network, by default None
         """
-        super().__init__(in_features=layers[0], out_features=1, **kwargs)
-        self.loss_fn = GeneratorLoss(eta=eta, alpha=alpha, cell=None, friction=friction, n_cvs=1)
+        super().__init__(model=layers, **kwargs)
+        self.loss_fn = GeneratorLoss(eta=eta, alpha=alpha, friction=friction, r=1)
         self.r = 1
         self.eta = eta
         self.friction = friction
@@ -119,11 +119,11 @@ class IndicatorProduction(BaseCV, lightning.LightningModule):
     >>> trivial.nn = copy.deepcopy(model.nn).to("cpu").to(torch.float32)
     """
 
-    BLOCKS = ["nn"]
+    DEFAULT_BLOCKS = ["nn"]
 
-    def __init__(self, layers, eta, r, alpha=20, friction=None, options=None, coeffs=None, **kwargs):
-        super().__init__(in_features=layers[0], out_features=1, **kwargs)
-        self.loss_fn = GeneratorLoss(eta=eta, alpha=alpha, cell=None, friction=friction, n_cvs=r)
+    def __init__(self, layers, eta, alpha=20, friction=None, options=None, coeffs=None, **kwargs):
+        super().__init__(model=layers, **kwargs)
+        self.loss_fn = GeneratorLoss(eta=eta, alpha=alpha, friction=friction, r=1)
         options = self.parse_options(options or {})
         o = "nn"
         if "activation" not in options[o]:
