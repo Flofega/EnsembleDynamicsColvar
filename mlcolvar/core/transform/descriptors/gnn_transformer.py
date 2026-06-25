@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from typing import List, Optional, Tuple, Union
-from gnn_utils import soft_weighted_unsorted_segment_sum, unsorted_segment_sum, _sanitize_cell_local, compute_distances_matrix_safe, CurvatureRegularizationLoss
+from mlcolvar.core.transform.descriptors.gnn_utils import soft_weighted_unsorted_segment_sum, unsorted_segment_sum, _sanitize_cell_local, compute_distances_matrix_safe, CurvatureRegularizationLoss
 from mlcolvar.core.transform import Transform
 from mlcolvar.core.transform.descriptors.utils import sanitize_positions_shape
 import lightning

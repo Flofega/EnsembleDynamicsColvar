@@ -8,6 +8,8 @@ __all__ = [
     "MultiTaskCV",
     'Committor',
     "Generator",
+    "IndicatorTraining",
+    "IndicatorProduction",
 ]
 
 from .cv import BaseCV
@@ -17,3 +19,4 @@ from .timelagged import *
 from .multitask import *
 from .committor import *
 from .generator import *
+from .indicator import *

@@ -4,6 +4,7 @@ from mlcolvar.core.loss.generator_loss import GeneratorLoss, compute_eigenfuncti
 import lightning
 import torch
 
+__all__ = ["IndicatorTraining", "IndicatorProduction"]
 
 class IndicatorTraining(BaseCV, lightning.LightningModule):
     """Train an indicator function to be 1 inside the known domain and different from 1 outside.
