@@ -1,4 +1,4 @@
-__all__ = ["ContinuousHistogram", "Normalization", "SwitchingFunctions"]
+__all__ = ["ContinuousHistogram", "LogHistogram", "Normalization", "SwitchingFunctions"]
 
 from .continuous_hist import *
 from .normalization import *
