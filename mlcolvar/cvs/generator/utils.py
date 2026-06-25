@@ -72,9 +72,6 @@ def compute_eigenfunctions(input : torch.Tensor,
             )
         
 
-    # expand friction tensor
-    friction = friction.unsqueeze(-1).repeat((1, n_dim)).ravel()
-
     # ------------------------ GRADIENTS ------------------------    
     # compute gradients of output wrt to the input iterating on the outputs
     grad_outputs = torch.ones(len(output), device=device)
@@ -105,15 +102,24 @@ def compute_eigenfunctions(input : torch.Tensor,
 
     
 
-    if r==1:
-        gradient_positions = gradient_positions.unsqueeze(-1)
-
     # this is to make the following computation easier to write
     gradient_positions = gradient_positions.swapaxes(2,1)
-    
+
+    # move friction to the same device as the data and expand if needed
+    friction = friction.to(gradient_positions.device)
+    n_dofs = gradient_positions.shape[-1]
+    if friction.numel() == n_dofs:
+        friction_expanded = friction
+    elif friction.numel() * n_dim == n_dofs:
+        friction_expanded = friction.unsqueeze(-1).repeat((1, n_dim)).ravel()
+    else:
+        raise RuntimeError(
+            f"Incompatible friction shape: got {friction.numel()} entries for {n_dofs} positional dofs."
+        )
+
     # multiply by friction
     try:
-        gradient_positions = gradient_positions * torch.sqrt(friction)
+        gradient_positions = gradient_positions * torch.sqrt(friction_expanded)
     except RuntimeError as e:
         raise RuntimeError(e, """[HINT]: Is you system in 3 dimension? By default the code assumes so, if it's not the case change the n_dim key to the right dimensionality.""")
 

@@ -53,12 +53,22 @@ class IndicatorTraining(BaseCV, lightning.LightningModule):
         if cell is None:
             cell = self.cell
         if recompute or self.evecs is None:
-            dataset["data"].requires_grad = True
+            dataset["data"].requires_grad_(True)
             output = self.forward(dataset["data"])
-            desc_derivs = dataset["derivatives"] if "derivatives" in dataset.keys() else None
+
+            # Check for descriptor derivatives in dataset regardless of container type.
+            try:
+                desc_derivs = dataset["derivatives"]
+            except (KeyError, IndexError):
+                desc_derivs = None
             eigenfunctions, evals, evecs = compute_eigenfunctions(
-                dataset["data"], output, dataset["weights"],
-                friction, eta, self.r, cell, tikhonov_reg,
+                input=dataset["data"],
+                output=output,
+                weights=dataset["weights"],
+                r=self.r,
+                eta=eta,
+                friction=friction,
+                tikhonov_reg=tikhonov_reg,
                 descriptors_derivatives=desc_derivs,
             )
             self.evals = evals
