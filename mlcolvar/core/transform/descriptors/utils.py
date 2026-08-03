@@ -152,7 +152,7 @@ def _apply_pbc_distances(dist_components, pbc_cell):
             while c.ndim < dist_components[:, d, :].ndim:
                 c = c.unsqueeze(-1)
             shifts[:, d, :] = torch.div(dist_components[:, d, :], c / 2, rounding_mode='trunc')
-            shifts[:, d, :] = torch.div(shifts[:, d, :] + 1 * torch.sign(shifts[:, d, :]), 2, rounding_mode='trunc') * c / 2
+            shifts[:, d, :] = torch.div(shifts[:, d, :] + 1 * torch.sign(shifts[:, d, :]), 2, rounding_mode='trunc') * c
 
     # apply shifts
     dist_components = dist_components - shifts
