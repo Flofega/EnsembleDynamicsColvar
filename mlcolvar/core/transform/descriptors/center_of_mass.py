@@ -102,7 +102,11 @@ class CenterOfMass(Transform):
 
         super().__init__(in_features=int(n_atoms * 3), out_features=int(n_groups * 3))
 
-        masses = torch.as_tensor(masses, dtype=torch.float64).to(torch.get_default_dtype())
+        # Build all buffers on CPU regardless of the device `masses` was given on: this keeps
+        # every internal tensor (pairs, weights, indices) on the same device at construction time.
+        # Move the whole module to the target device afterwards (e.g. `model.to(device)`), which
+        # will move all registered buffers together and keep them in sync.
+        masses = torch.as_tensor(masses, dtype=torch.float64).to(torch.get_default_dtype()).cpu()
         if masses.numel() != n_atoms:
             raise ValueError(f"`masses` must contain exactly {n_atoms} elements (n_atoms), found {masses.numel()}.")
         if torch.any(masses <= 0):
@@ -157,18 +161,24 @@ class CenterOfMass(Transform):
                                        slicing_pairs=self._pairs,
                                        vector=True)
 
-        pair_weight = self._pair_weight.to(disp.dtype)
-        total_mass = self._total_mass.to(disp.dtype)
+        # Cast the group bookkeeping buffers to the input's device/dtype at call time. This keeps
+        # `pos` and the module's buffers in sync even if the module hasn't been explicitly moved
+        # with `.to(device)` after construction (e.g. when `masses` was created on a different
+        # device than the positions passed to `forward`).
+        pair_weight = self._pair_weight.to(device=device, dtype=disp.dtype)
+        total_mass = self._total_mass.to(device=device, dtype=disp.dtype)
+        pair_group_id = self._pair_group_id.to(device)
+        ref_indices = self._ref_indices.to(device)
 
         weighted_disp = disp * pair_weight.view(1, 1, -1)
 
         # scatter-add the weighted displacements of each group's atoms into their group's slot
         com_disp = torch.zeros(batch_size, 3, self.n_groups, device=device, dtype=weighted_disp.dtype)
-        com_disp.index_add_(2, self._pair_group_id, weighted_disp)
+        com_disp.index_add_(2, pair_group_id, weighted_disp)
         com_disp = com_disp / total_mass.view(1, 1, -1)
         com_disp = com_disp.transpose(1, 2)  # [batch_size, n_groups, 3]
 
-        ref_pos = pos_sanitized[:, self._ref_indices, :]  # [batch_size, n_groups, 3]
+        ref_pos = pos_sanitized[:, ref_indices, :]  # [batch_size, n_groups, 3]
         com = ref_pos + com_disp
         return com.reshape(batch_size, -1)
 
