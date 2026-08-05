@@ -9,7 +9,8 @@ __all__ = ["Transform",
            "Inverse",
            "TorsionalAngles",
            "SequentialTransform",
-           "TorsionalAngle"]
+           "TorsionalAngle",
+           "CenterOfMass"]
 
 from .transform import *
 from .utils import *
