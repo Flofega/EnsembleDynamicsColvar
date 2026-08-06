@@ -2,6 +2,9 @@ from mlcolvar.cvs import BaseCV
 from mlcolvar.core import FeedForward
 from mlcolvar.core.loss.generator_loss import GeneratorLoss
 from mlcolvar.cvs.generator import compute_eigenfunctions
+from mlcolvar.core.loss.utils.smart_derivatives import SmartDerivatives
+from mlcolvar.core.loss.utils.vjp_derivatives import VJPDerivatives
+from typing import Union, Tuple
 import lightning
 import torch
 
@@ -14,7 +17,7 @@ class IndicatorTraining(BaseCV, lightning.LightningModule):
 
     DEFAULT_BLOCKS = ["nn"]
 
-    def __init__(self, layers, eta, alpha=20, friction=None, options=None, **kwargs):
+    def __init__(self, layers, eta, alpha=20, friction=None, descriptors_derivatives: Union[SmartDerivatives, VJPDerivatives, torch.Tensor] = None, options=None, **kwargs):
         """Initialize and Indicator for training.
 
         Parameters
@@ -27,11 +30,17 @@ class IndicatorTraining(BaseCV, lightning.LightningModule):
             Regularization parameter, by default 20
         friction : float, optional
             Langevin friction coefficients, by default None
+        descriptors_derivatives : Union[SmartDerivatives, VJPDerivatives, torch.Tensor], optional
+            Derivatives of descriptors wrt atomic positions (if used) to speed up calculation of gradients, by default None. 
+            Can be either:
+                - A `SmartDerivatives` object to save both memory and time, see also mlcolvar.core.loss.committor_loss.SmartDerivatives
+                - A `VJPDerivatives` object to save both memory and time, see also mlcolvar.core.loss.utils.vjp_derivatives.VJPDerivatives
+                - A torch.Tensor with the derivatives to save time, memory-wise could be less efficient
         options : dict, optional
             Additional options for the neural network, by default None
         """
         super().__init__(model=layers, **kwargs)
-        self.loss_fn = GeneratorLoss(eta=eta, alpha=alpha, friction=friction, r=1)
+        self.loss_fn = GeneratorLoss(eta=eta, alpha=alpha, friction=friction, r=1, descriptors_derivatives=descriptors_derivatives)
         self.r = 1
         self.eta = eta
         self.friction = friction
