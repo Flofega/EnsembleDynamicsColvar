@@ -14,6 +14,7 @@ __all__ = [
     "CommittorLoss",
     "committor_loss",
     "SmartDerivatives",
+    "VJPDerivatives",
     "compute_descriptors_derivatives",
     "GeneratorLoss",
 ]
@@ -27,3 +28,4 @@ from .fisher import FisherDiscriminantLoss, fisher_discriminant_loss
 from .committor_loss import CommittorLoss, committor_loss
 from .generator_loss import GeneratorLoss
 from .utils.smart_derivatives import SmartDerivatives, compute_descriptors_derivatives
+from .utils.vjp_derivatives import VJPDerivatives

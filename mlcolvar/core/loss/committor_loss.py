@@ -17,6 +17,7 @@ __all__ = ["CommittorLoss", "committor_loss"]
 import torch
 from typing import Tuple, Union
 from mlcolvar.core.loss.utils.smart_derivatives import SmartDerivatives
+from mlcolvar.core.loss.utils.vjp_derivatives import VJPDerivatives
 import torch_geometric
 import warnings
 
@@ -35,7 +36,7 @@ class CommittorLoss(torch.nn.Module):
                 gamma: float = 10000.0,
                 delta_f: float = 0.0,
                 separate_boundary_dataset : bool = True,
-                descriptors_derivatives : Union[SmartDerivatives, torch.Tensor] = None,
+                descriptors_derivatives : Union[SmartDerivatives, VJPDerivatives, torch.Tensor] = None,
                 log_var: bool = False,
                 use_gradients_wrt_positions: bool = True,
                 z_regularization: float = 0.0,
@@ -59,16 +60,17 @@ class CommittorLoss(torch.nn.Module):
             State B is supposed to be higher in energy.
         separate_boundary_dataset : bool, optional
             Switch to exculde boundary condition labeled data from the variational loss, by default True
-        descriptors_derivatives : Union[SmartDerivatives, torch.Tensor], optional
+        descriptors_derivatives : Union[SmartDerivatives, VJPDerivatives, torch.Tensor], optional
             Derivatives of descriptors wrt atomic positions (if used) to speed up calculation of gradients, by default None. 
             Can be either:
                 - A `SmartDerivatives` object to save both memory and time, see also mlcolvar.core.loss.committor_loss.SmartDerivatives
+                - A `VJPDerivatives` object to save both memory and time, see also mlcolvar.core.loss.committor_loss.VJPDerivatives
                 - A torch.Tensor with the derivatives to save time, memory-wise could be less efficient
         ref_idx: torch.Tensor, optional
             Reference indeces for the unshuffled dataset for properly handling batching/splitting/shuffling
             when descriptors derivatives are provided, by default None. 
-            Ref_idx can be generated automatically using SmartDerivatives or by setting create_ref_idx=True when initializing a DictDataset.
-            See also mlcolvar.core.loss.utils.smart_derivatives.SmartDerivatives
+            Ref_idx can be generated automatically using SmartDerivatives or VJPDerivatives, or by setting create_ref_idx=True when initializing a DictDataset.
+            See also mlcolvar.core.loss.utils.smart_derivatives.SmartDerivatives and mlcolvar.core.loss.utils.vjp_derivatives.VJPDerivatives
         log_var : bool, optional
             Switch to minimize the log of the variational functional, by default False.
         use_gradients_wrt_positions : bool, optional
@@ -122,8 +124,8 @@ class CommittorLoss(torch.nn.Module):
         ref_idx : torch.Tensor, optional
             Reference indeces for the unshuffled dataset for properly handling batching/splitting/shuffling
             when descriptors derivatives are provided, by default None. 
-            Ref_idx can be generated automatically using SmartDerivatives or by setting create_ref_idx=True when initializing a DictDataset.
-            See also mlcolvar.core.loss.utils.smart_derivatives.SmartDerivatives
+            Ref_idx can be generated automatically using SmartDerivatives or VJPDerivatives, or by setting create_ref_idx=True when initializing a DictDataset.
+            See also mlcolvar.core.loss.utils.smart_derivatives.SmartDerivatives and mlcolvar.core.loss.utils.vjp_derivatives.VJPDerivatives
         create_graph : bool, optional
             Whether to create the graph during the computation for backpropagation, by default True
 
@@ -164,7 +166,7 @@ def committor_loss(x: torch.Tensor,
                    delta_f: float = 0,
                    create_graph: bool = True,
                    separate_boundary_dataset: bool = True,
-                   descriptors_derivatives: Union[SmartDerivatives, torch.Tensor] = None,
+                   descriptors_derivatives: Union[SmartDerivatives, VJPDerivatives, torch.Tensor] = None,
                    log_var: bool = False,
                    use_gradients_wrt_positions: bool = True,
                    z_regularization: float = 0.0,
@@ -201,10 +203,11 @@ def committor_loss(x: torch.Tensor,
         Make loss backwardable, deactivate for validation to save memory, default True
     separate_boundary_dataset : bool, optional
             Switch to exculde boundary condition labeled data from the variational loss, by default True
-    descriptors_derivatives : Union[SmartDerivatives, torch.Tensor], optional
+    descriptors_derivatives : Union[SmartDerivatives, VJPDerivatives, torch.Tensor], optional
         Derivatives of descriptors wrt atomic positions (if used) to speed up calculation of gradients, by default None. 
         Can be either:
             - A `SmartDerivatives` object to save both memory and time, see also mlcolvar.core.loss.committor_loss.SmartDerivatives
+            - A `VJPDerivatives` object to save both memory and time, see also mlcolvar.core.loss.committor_loss.VJPDerivatives
             - A torch.Tensor with the derivatives to save time, memory-wise could be less efficient
     log_var : bool, optional
         Switch to minimize the log of the variational functional, by default False.
@@ -220,8 +223,8 @@ def committor_loss(x: torch.Tensor,
     ref_idx: torch.Tensor, optional
         Reference indeces for the unshuffled dataset for properly handling batching/splitting/shuffling
         when descriptors derivatives are provided, by default None. 
-        Ref_idx can be generated automatically using SmartDerivatives or by setting create_ref_idx=True when initializing a DictDataset.
-        See also mlcolvar.core.loss.utils.smart_derivatives.SmartDerivatives
+        Ref_idx can be generated automatically using SmartDerivatives or VJPDerivatives, or by setting create_ref_idx=True when initializing a DictDataset.
+        See also mlcolvar.core.loss.utils.smart_derivatives.SmartDerivatives and mlcolvar.core.loss.utils.vjp_derivatives.VJPDerivatives
     n_dim : int
         Number of dimensions, by default None. 
         If None, it defaults to 3 for the position-based loss and to 1 for the position-less loss.
@@ -245,7 +248,7 @@ def committor_loss(x: torch.Tensor,
             raise ValueError ("descriptors_derivatives must be None when using approximated variational principle (use_gradients_wrt_positions is False)")
 
     if isinstance(descriptors_derivatives, torch.Tensor) and separate_boundary_dataset:
-        raise ValueError ("Descriptors derivatives via explicit tensor are not implemented with separate_boundary_dataset key! Either use SmartDerivatives or deactivate separate_boundary_dataset")
+        raise ValueError ("Descriptors derivatives via explicit tensor are not implemented with separate_boundary_dataset key! Either use SmartDerivatives or VJPDerivatives, or deactivate separate_boundary_dataset")
     
     if (z_threshold is not None and (z_regularization == 0 or z_threshold <= 0)) or (z_threshold is None and z_regularization != 0) or z_regularization < 0:
         raise ValueError(f"To apply the regularization on z space both z_threshold and z_regularization key must be positive. Found {z_threshold} and {z_regularization}!")
@@ -350,7 +353,11 @@ def committor_loss(x: torch.Tensor,
         if use_gradients_wrt_positions and isinstance(descriptors_derivatives, SmartDerivatives):
             # we use the precomputed derivatives from descriptors to pos
             gradient_positions = descriptors_derivatives(grad, ref_idx[mask_var]).view(x[mask_var].shape[0], -1)
-        
+
+        elif use_gradients_wrt_positions and isinstance(descriptors_derivatives, VJPDerivatives):
+            # we use the precomputed derivatives from descriptors to pos
+            gradient_positions = descriptors_derivatives(grad, ref_idx[mask_var]).view(x[mask_var].shape[0], -1)
+
         # --> If we directly pass the matrix d_desc/d_pos
         elif use_gradients_wrt_positions and isinstance(descriptors_derivatives, torch.Tensor): 
             descriptors_derivatives = descriptors_derivatives.to(device)

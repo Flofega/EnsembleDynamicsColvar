@@ -7,6 +7,7 @@ __all__ = ["GeneratorLoss"]
 import torch
 from typing import Union, Tuple
 from mlcolvar.core.loss.utils.smart_derivatives import SmartDerivatives
+from mlcolvar.core.loss.utils.vjp_derivatives import VJPDerivatives
 
 
 class GeneratorLoss(torch.nn.Module):
@@ -17,7 +18,7 @@ class GeneratorLoss(torch.nn.Module):
                  eta: float, 
                  friction: torch.Tensor, 
                  alpha: float,
-                 descriptors_derivatives: Union[SmartDerivatives, torch.Tensor] = None,
+                 descriptors_derivatives: Union[SmartDerivatives, VJPDerivatives, torch.Tensor] = None,
                  n_dim: int = 3,
                  u_stat: bool = True,
                  ):
@@ -33,16 +34,17 @@ class GeneratorLoss(torch.nn.Module):
             Langevin friction, i.e., $\sqrt{k_B*T/(gamma*m_i)}$
         alpha : float
             Hyperparamer that scales the contribution of orthonormality loss to the total loss, i.e., L = L_ef + alpha*L_ortho
-        descriptors_derivatives : Union[SmartDerivatives, torch.Tensor], optional
+        descriptors_derivatives : Union[SmartDerivatives, VJPDerivatives, torch.Tensor], optional
             Derivatives of descriptors wrt atomic positions (if used) to speed up calculation of gradients, by default None. 
             Can be either:
                 - A `SmartDerivatives` object to save both memory and time, see also mlcolvar.core.loss.committor_loss.SmartDerivatives
+                - A `VJPDerivatives` object to save both memory and time, see also mlcolvar.core.loss.utils.vjp_derivatives.VJPDerivatives
                 - A torch.Tensor with the derivatives to save time, memory-wise could be less efficient
         ref_idx: torch.Tensor, optional
             Reference indeces for the unshuffled dataset for properly handling batching/splitting/shuffling
             when descriptors derivatives are provided, by default None. 
-            Ref_idx can be generated automatically using SmartDerivatives or by setting create_ref_idx=True when initializing a DictDataset.
-            See also mlcolvar.core.loss.utils.smart_derivatives.SmartDerivatives
+            Ref_idx can be generated automatically using SmartDerivatives or VJPDerivatives, or by setting create_ref_idx=True when initializing a DictDataset.
+            See also mlcolvar.core.loss.utils.smart_derivatives.SmartDerivatives and mlcolvar.core.loss.utils.vjp_derivatives.VJPDerivatives
         n_dim : int
             Number of dimensions, by default 3.
         u_stat : bool
@@ -110,7 +112,7 @@ def generator_loss(input : torch.Tensor,
                    alpha : float,
                    friction : torch.Tensor,
                    lambdas : torch.Tensor,
-                   descriptors_derivatives : Union[SmartDerivatives, torch.Tensor] = None,
+                   descriptors_derivatives : Union[SmartDerivatives, VJPDerivatives, torch.Tensor] = None,
                    ref_idx : torch.Tensor = None,
                    n_dim : int = 3,
                    u_stat : bool = True,
@@ -133,16 +135,17 @@ def generator_loss(input : torch.Tensor,
         Langevin friction, i.e., $\sqrt{k_B*T/(gamma*m_i)}$
     lambdas : torch.Tensor
         Trainable parameters. After training, they should correspond to the resolvent eigenvalues.
-    descriptors_derivatives : Union[SmartDerivatives, torch.Tensor], optional
+    descriptors_derivatives : Union[SmartDerivatives, VJPDerivatives, torch.Tensor], optional
         Derivatives of descriptors wrt atomic positions (if used) to speed up calculation of gradients, by default None. 
         Can be either:
             - A `SmartDerivatives` object to save both memory and time, see also mlcolvar.core.loss.committor_loss.SmartDerivatives
+            - A `VJPDerivatives` object to save both memory and time, see also mlcolvar.core.loss.utils.vjp_derivatives.VJPDerivatives
             - A torch.Tensor with the derivatives to save time, memory-wise could be less efficient
     ref_idx: torch.Tensor, optional
         Reference indeces for the unshuffled dataset for properly handling batching/splitting/shuffling
         when descriptors derivatives are provided, by default None. 
-        Ref_idx can be generated automatically using SmartDerivatives or by setting create_ref_idx=True when initializing a DictDataset.
-        See also mlcolvar.core.loss.utils.smart_derivatives.SmartDerivatives
+        Ref_idx can be generated automatically using SmartDerivatives or VJPDerivatives, or by setting create_ref_idx=True when initializing a DictDataset.
+        See also mlcolvar.core.loss.utils.smart_derivatives.SmartDerivatives and mlcolvar.core.loss.utils.vjp_derivatives.VJPDerivatives
     n_dim : int
         Number of dimensions, by default 3.
     u_stat : bool
@@ -179,6 +182,8 @@ def generator_loss(input : torch.Tensor,
     # in case the input is not positions but descriptors, we need to correct the gradients up to the positions
     # --> If we pass a SmartDerivative object that takes the nonzero elements of the matrix d_desc/d_pos
     if isinstance(descriptors_derivatives, SmartDerivatives):
+        gradient_positions = descriptors_derivatives(gradient, ref_idx).view(input.shape[0], -1, r)
+    elif isinstance(descriptors_derivatives, VJPDerivatives):
         gradient_positions = descriptors_derivatives(gradient, ref_idx).view(input.shape[0], -1, r)
     
     # --> If we directly pass the matrix d_desc/d_pos
