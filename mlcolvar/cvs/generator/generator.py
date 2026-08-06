@@ -6,6 +6,7 @@ from mlcolvar.core import FeedForward
 from mlcolvar.core.loss.generator_loss import GeneratorLoss
 from mlcolvar.cvs.generator.utils import compute_eigenfunctions
 from mlcolvar.core.loss.utils.smart_derivatives import SmartDerivatives
+from mlcolvar.core.loss.utils.vjp_derivatives import VJPDerivatives
 from mlcolvar.data import DictDataset
 
 __all__ = ["Generator"]
@@ -43,7 +44,7 @@ class Generator(BaseCV):
                  eta: float,
                  alpha: float,
                  friction: torch.Tensor,
-                 descriptors_derivatives: Union[SmartDerivatives, torch.Tensor] = None,
+                 descriptors_derivatives: Union[SmartDerivatives, VJPDerivatives, torch.Tensor] = None,
                  n_dim: int = 3,
                  u_stat:bool = True,
                  options: dict = None,
@@ -63,10 +64,11 @@ class Generator(BaseCV):
             Hyperparamer that scales the contribution of orthonormality loss to the total loss, i.e., L = L_ef + alpha*L_ortho        
         friction: torch.Tensor
             Langevin friction, i.e., $\sqrt{k_B*T/(gamma*m_i)}$
-        descriptors_derivatives : Union[SmartDerivatives, torch.Tensor], optional
+        descriptors_derivatives : Union[SmartDerivatives, VJPDerivatives, torch.Tensor], optional
             Derivatives of descriptors wrt atomic positions (if used) to speed up calculation of gradients, by default None. 
             Can be either:
                 - A `SmartDerivatives` object to save both memory and time, see also mlcolvar.core.loss.committor_loss.SmartDerivatives
+                - A `VJPDerivatives` object to save both memory and time, see also mlcolvar.core.loss.utils.vjp_derivatives.VJPDerivatives
                 - A torch.Tensor with the derivatives to save time, memory-wise could be less efficient
         n_dim : int
             Number of dimensions, by default 3

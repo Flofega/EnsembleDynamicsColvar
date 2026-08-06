@@ -81,9 +81,9 @@ class Committor(BaseCV):
             State B is supposed to be higher in energy.
         separate_boundary_dataset : bool, optional
             Switch to exculde boundary condition labeled data from the variational loss, by default True
-        descriptors_derivatives : torch.nn.Module, optional
-            `SmartDerivatives` object to save memory and time when using descriptors. Cannot be used with GNN models.
-            See also mlcolvar.core.loss.committor_loss.SmartDerivatives
+        descriptors_derivatives : Union[SmartDerivatives, VJPDerivatives], optional
+            `SmartDerivatives` or `VJPDerivatives` object to save memory and time when using descriptors. Cannot be used with GNN models.
+            See also mlcolvar.core.loss.committor_loss.SmartDerivatives and mlcolvar.core.loss.utils.vjp_derivatives.VJPDerivatives
         log_var : bool, optional
             Switch to minimize the log of the variational functional, by default False.
         use_gradients_wrt_positions : bool, optional
