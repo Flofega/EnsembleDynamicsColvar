@@ -65,8 +65,10 @@ def fit_type_prior(
 
     Equivalent to Bayesian linear regression with prior ``w ~ N(0, (sigma2 /
     ridge_lambda) I)`` and likelihood ``y = X w + eps``, ``eps ~ N(0, sigma2
-    I)``: returns the resulting posterior ``(mu, Sigma)``, which is used
-    downstream as the *prior* for the per-instance conjugate update (see
+    I)``, fit on the *mean* (per-row) Gram statistics rather than their raw
+    sums (see :func:`fit_type_prior_from_stats` for why): returns the
+    resulting posterior ``(mu, Sigma)``, which is used downstream as the
+    *prior* for the per-instance conjugate update (see
     :func:`fit_instance_posterior`).
 
     Parameters
@@ -74,9 +76,12 @@ def fit_type_prior(
     X : np.ndarray, shape (n_samples, n_features)
     y : np.ndarray, shape (n_samples,)
     ridge_lambda : float
-        Ridge regularization strength: encodes a weakly-informative outer
-        prior on the type-level fit itself, and keeps ``X^T X`` invertible
-        when ``n_samples < n_features`` or features are collinear.
+        Ridge regularization strength, relative to the *per-row* feature
+        scale/variance (NOT the total pooled sample count -- see
+        :func:`fit_type_prior_from_stats`). Encodes a weakly-informative
+        outer prior on the type-level fit itself, and keeps ``X^T X``
+        invertible when ``n_samples < n_features`` or features are
+        collinear.
     has_bias : bool
         If True (matching ``CGResidueEnergy(use_bias=True)``), the LAST
         feature column is treated as a constant intercept term and is
@@ -126,6 +131,37 @@ def fit_type_prior_from_stats(
     in the final running totals. See ``train_cg_energy.py``'s streaming
     accumulation (``ResidueStats``) for the intended usage.
 
+    Numerical note: the fit is done on the *mean* (per-row) Gram statistics
+    ``XtX/n_samples``, ``Xty/n_samples``, ``yty/n_samples`` rather than their
+    raw sums. Two reasons:
+
+    1. ``ridge_lambda`` is added directly to this matrix's diagonal, so
+       working with the mean keeps ``ridge_lambda``'s meaning (a
+       regularization strength relative to the per-row feature
+       scale/variance) independent of how many rows happen to be pooled for
+       a given type. Adding a fixed ``ridge_lambda`` straight to the raw
+       (unnormalized) sum ``XtX`` -- whose scale grows linearly with
+       ``n_samples`` -- makes the same ``ridge_lambda`` an ever-weaker
+       relative regularizer as more frames/instances are pooled (as happens
+       for larger systems or longer trajectories), which previously required
+       re-guessing an appropriate ``ridge_lambda`` for every new system size.
+    2. It keeps the residual-sum-of-squares computation (see below) well
+       conditioned: with raw sums, ``yty``/``mu@Xty``/``mu@(XtX@mu)`` all
+       scale with ``n_samples`` (easily 1e5-1e6+ for large systems), so their
+       differences -- which should equal the (much smaller) true residual --
+       are dominated by floating-point cancellation error, producing
+       wildly-inflated, physically meaningless ``sigma2`` values (not a
+       literal float64 overflow, just catastrophic loss of precision well
+       before the ~1.8e308 overflow threshold). Computing the equivalent
+       *mean* residual first (all terms O(per-row scale), no ``n_samples``
+       blow-up) and rescaling by ``n_samples`` only at the very end (a benign
+       multiplication, not a subtraction of near-equal numbers) avoids this.
+
+    Mathematically this is exactly equivalent to solving the raw (unnormalized)
+    system with ``ridge_lambda`` scaled up by ``n_samples`` -- it only changes
+    floating-point conditioning/precision and the user-facing meaning of
+    ``ridge_lambda``, not the underlying model.
+
     Parameters
     ----------
     XtX : np.ndarray, shape (n_features, n_features)
@@ -143,14 +179,23 @@ def fit_type_prior_from_stats(
     ridge_diag = np.full(n_features, ridge_lambda)
     if has_bias:
         ridge_diag[-1] = bias_ridge_lambda
-    A = XtX + np.diag(ridge_diag)
-    mu = np.linalg.solve(A, Xty)
-    resid_ss = float(yty - 2.0 * (mu @ Xty) + mu @ (XtX @ mu))
-    resid_ss = max(resid_ss, 0.0)  # guard against float cancellation for a near-zero residual
+    # Mean (per-row) Gram statistics -- see the numerical note above for why
+    # this (rather than the raw sums) is what ridge_lambda is applied to.
+    mean_XtX = XtX / n_samples
+    mean_Xty = Xty / n_samples
+    mean_yty = yty / n_samples
+    A = mean_XtX + np.diag(ridge_diag)
+    mu = np.linalg.solve(A, mean_Xty)
+    mean_resid_ss = float(mean_yty - 2.0 * (mu @ mean_Xty) + mu @ (mean_XtX @ mu))
+    mean_resid_ss = max(mean_resid_ss, 0.0)  # guard against float cancellation for a near-zero residual
+    resid_ss = mean_resid_ss * n_samples  # rescale back to the true (unnormalized) sum of squares
     dof = max(n_samples - n_features, 1)
     sigma2 = resid_ss / dof
     sigma2 = max(sigma2, 1e-8)  # guard against a degenerate all-zero residual
-    Sigma = sigma2 * np.linalg.inv(A)
+    # A is the mean-Gram matrix's ridge system, i.e. A == (XtX + n_samples*ridge_diag) / n_samples;
+    # the true (unnormalized) posterior covariance is sigma2 * inv(XtX + n_samples*ridge_diag)
+    # == (sigma2 / n_samples) * inv(A).
+    Sigma = (sigma2 / n_samples) * np.linalg.inv(A)
     return TypePrior(mu=mu, Sigma=Sigma, sigma2=sigma2, n_samples=n_samples, has_data=True)
 
 
