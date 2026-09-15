@@ -29,9 +29,11 @@ __all__ = [
     "TypePrior",
     "InstancePosterior",
     "fit_type_prior",
+    "fit_type_prior_from_stats",
     "default_type_prior",
     "decouple_bias_prior",
     "fit_instance_posterior",
+    "fit_instance_posterior_from_stats",
 ]
 
 
@@ -96,14 +98,57 @@ def fit_type_prior(
     n_samples, n_features = X.shape
     XtX = X.T @ X
     Xty = X.T @ y
+    yty = float(y @ y)
+    return fit_type_prior_from_stats(
+        XtX, Xty, yty, n_samples,
+        ridge_lambda=ridge_lambda, has_bias=has_bias, bias_ridge_lambda=bias_ridge_lambda,
+    )
+
+
+def fit_type_prior_from_stats(
+    XtX: np.ndarray,
+    Xty: np.ndarray,
+    yty: float,
+    n_samples: int,
+    ridge_lambda: float = 1e-3,
+    has_bias: bool = True,
+    bias_ridge_lambda: float = 1e-8,
+) -> TypePrior:
+    """Same fit as :func:`fit_type_prior`, but takes precomputed sufficient
+    statistics (``X^T X``, ``X^T y``, ``y^T y``, ``n_samples``) instead of
+    raw (X, y) rows.
+
+    This is what makes the fit possible without ever holding the full pooled
+    design matrix (all training frames x all instances of a type) in memory:
+    ``XtX``/``Xty``/``yty`` are additive over rows, so a caller can
+    accumulate them incrementally -- frame-chunk by frame-chunk, trajectory
+    by trajectory, or residue-instance by residue-instance -- and only pass
+    in the final running totals. See ``train_cg_energy.py``'s streaming
+    accumulation (``ResidueStats``) for the intended usage.
+
+    Parameters
+    ----------
+    XtX : np.ndarray, shape (n_features, n_features)
+        Pooled ``X^T X``.
+    Xty : np.ndarray, shape (n_features,)
+        Pooled ``X^T y``.
+    yty : float
+        Pooled ``y^T y`` (i.e. ``sum(y**2)``), needed to recover the
+        residual sum of squares without the raw rows: ``resid @ resid ==
+        yty - 2*mu@Xty + mu@XtX@mu``.
+    n_samples : int
+        Total number of pooled (residue-instance, frame) rows.
+    """
+    n_features = XtX.shape[0]
     ridge_diag = np.full(n_features, ridge_lambda)
     if has_bias:
         ridge_diag[-1] = bias_ridge_lambda
     A = XtX + np.diag(ridge_diag)
     mu = np.linalg.solve(A, Xty)
-    resid = y - X @ mu
+    resid_ss = float(yty - 2.0 * (mu @ Xty) + mu @ (XtX @ mu))
+    resid_ss = max(resid_ss, 0.0)  # guard against float cancellation for a near-zero residual
     dof = max(n_samples - n_features, 1)
-    sigma2 = float(resid @ resid) / dof
+    sigma2 = resid_ss / dof
     sigma2 = max(sigma2, 1e-8)  # guard against a degenerate all-zero residual
     Sigma = sigma2 * np.linalg.inv(A)
     return TypePrior(mu=mu, Sigma=Sigma, sigma2=sigma2, n_samples=n_samples, has_data=True)
@@ -201,9 +246,21 @@ def fit_instance_posterior(
     X = np.asarray(X, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
     n_samples, n_features = X.shape
-    prior_precision = pooling_strength * np.linalg.inv(prior.Sigma)
     XtX = X.T @ X
     Xty = X.T @ y
+    return fit_instance_posterior_from_stats(XtX, Xty, n_samples, prior, pooling_strength=pooling_strength)
+
+
+def fit_instance_posterior_from_stats(
+    XtX: np.ndarray, Xty: np.ndarray, n_samples: int, prior: TypePrior, pooling_strength: float = 1.0
+) -> InstancePosterior:
+    """Same update as :func:`fit_instance_posterior`, but takes precomputed
+    sufficient statistics (``X^T X``, ``X^T y``, ``n_samples``) instead of
+    raw (X, y) rows -- see :func:`fit_type_prior_from_stats` for why this
+    matters (streaming accumulation instead of holding the full per-instance
+    design matrix in memory).
+    """
+    prior_precision = pooling_strength * np.linalg.inv(prior.Sigma)
     Lambda_post = prior_precision + XtX / prior.sigma2
     Sigma_post = np.linalg.inv(Lambda_post)
     mu_post = Sigma_post @ (prior_precision @ prior.mu + Xty / prior.sigma2)
