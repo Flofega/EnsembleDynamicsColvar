@@ -120,6 +120,7 @@ class CGResidueEnergy(Transform):
         n_replicas: int = 1,
         angular_chunk_size: Optional[int] = None,
         use_bias: bool = True,
+        use_neighbor_list: bool = True,
     ):
         """Initialises a CGResidueEnergy descriptor. We recommend initialising
         it from the Phase 1 ``residues.tsv`` schema and basis-function files
@@ -166,6 +167,24 @@ class CGResidueEnergy(Transform):
             that baseline well (it can only scale bounded, zero-at-cutoff
             basis functions). This feature acts as a per-residue-instance
             intercept once fitted (Phase 3).
+        use_neighbor_list : bool, optional
+            If True (default), radial/angular features are computed via a
+            cutoff-based neighbor list: for every residue only the (data
+            -dependent) subset of other residues actually within
+            ``radial_cutoff``/``angular_cutoff`` is gathered, so the
+            per-frame cost and (crucially) the size of any autograd
+            derivative built on top of this scale as O(N*K) (radial) /
+            O(N*K^2) (angular), where K = actual max neighbor count within
+            the cutoff -- essentially independent of protein size N --
+            instead of the O(N^2)/O(N^3) cost of naively computing all
+            residue pairs/triples and masking non-neighbors out afterward.
+            This is an *exact* reformulation (every pair truly within the
+            cutoff is still included exactly once), not an approximation:
+            with ``use_neighbor_list=True`` or ``False`` this class produces
+            numerically identical features (and derivatives) up to floating
+            -point round-off. Set to False to use the old dense O(N^2)/
+            O(N^3) implementation instead (kept only as a fallback/reference
+            for small systems or debugging).
         """
         self.n_residues = n_residues
         self.ndim = ndim
@@ -212,16 +231,22 @@ class CGResidueEnergy(Transform):
         self.pbc = pbc
         self.box = None if (box is None or not pbc) else _ensure_tensor(box)
         self.angular_chunk_size = angular_chunk_size if angular_chunk_size else n_residues
+        self.use_neighbor_list = use_neighbor_list
 
         # (n_residues, n_types) one-hot neighbor-type indicator, used to bin
         # radial/angular contributions by neighbor type via einsum.
         type_idx = torch.as_tensor(self.residue_types, dtype=torch.long)
+        self._residue_type_idx = type_idx  # (N,) residue index -> type index
         self._type_onehot = torch.nn.functional.one_hot(type_idx, num_classes=n_types).to(
             torch.get_default_dtype()
         )
 
         if self.use_angular:
             # Symmetric (unordered) type-pair -> linear index lookup table.
+            # Only O(n_types^2), independent of n_residues -- used directly
+            # (gathered on the fly per neighbor pair) by the neighbor-list
+            # path, and to build the (legacy) dense per-residue-pair one-hot
+            # buffer below.
             pair_index = torch.zeros((n_types, n_types), dtype=torch.long)
             p = 0
             for a in range(n_types):
@@ -233,10 +258,17 @@ class CGResidueEnergy(Transform):
             # Per-residue-pair (not per-type-pair!) bin id: residue_pair_id[j,k]
             # = pair_index[type(j), type(k)], then one-hot -> (N, N, n_type_pairs)
             # for vectorized binning of neighbor-pair (j,k) contributions.
-            residue_pair_id = pair_index[type_idx][:, type_idx]  # (N, N)
-            self._type_pair_onehot = torch.nn.functional.one_hot(
-                residue_pair_id, num_classes=self.n_type_pairs
-            ).to(torch.get_default_dtype())
+            # This buffer is O(N^2 * n_type_pairs) and is therefore only built
+            # (lazily skipped otherwise) when the dense fallback path is
+            # requested -- the neighbor-list path never needs it, since it
+            # looks up type-pair bins on the fly from the tiny
+            # ``_type_pair_index`` table for only the O(N*K^2) pairs that
+            # actually exist within the cutoff.
+            if not self.use_neighbor_list:
+                residue_pair_id = pair_index[type_idx][:, type_idx]  # (N, N)
+                self._type_pair_onehot = torch.nn.functional.one_hot(
+                    residue_pair_id, num_classes=self.n_type_pairs
+                ).to(torch.get_default_dtype())
 
     @staticmethod
     def from_files(
@@ -369,7 +401,226 @@ class CGResidueEnergy(Transform):
         return pos
 
     def _radial_features(self, pos: torch.Tensor, box: Optional[torch.Tensor]) -> torch.Tensor:
-        """pos: (Btot, N, D) -> (Btot, N, n_types*K_rad)."""
+        """pos: (Btot, N, D) -> (Btot, N, n_types*K_rad). Dispatches to the
+        O(N*K) neighbor-list implementation by default, or the legacy
+        O(N^2) dense implementation if ``use_neighbor_list=False``."""
+        if self.use_neighbor_list:
+            return self._radial_features_nlist(pos, box)
+        return self._radial_features_dense(pos, box)
+
+    def _angular_features(self, pos: torch.Tensor, box: Optional[torch.Tensor]) -> torch.Tensor:
+        """pos: (Btot, N, D) -> (Btot, N, n_type_pairs*K_ang). Dispatches to
+        the O(N*K^2) neighbor-list implementation by default, or the legacy
+        O(N^3)-ish dense implementation if ``use_neighbor_list=False``."""
+        if self.use_neighbor_list:
+            return self._angular_features_nlist(pos, box)
+        return self._angular_features_dense(pos, box)
+
+    def _build_neighbor_list(
+        self, pos: torch.Tensor, box: Optional[torch.Tensor], cutoff: float
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Builds a padded, fixed-width neighbor list (excluding self) for
+        every (batch, central residue), listing all OTHER residues within
+        ``cutoff``.
+
+        This is the key primitive that lets radial/angular feature
+        computation -- and, crucially, any autograd derivative built on top
+        of it (e.g. via ``smart_derivatives``/``VJPDerivatives``) -- scale as
+        O(N*K) / O(N*K^2) rather than O(N^2) / O(N^3) with the number of
+        residues N, where K is the actual (data-dependent) neighbor count
+        within the cutoff: bounded by the local physical density of residues
+        near the cutoff radius, essentially independent of protein size,
+        instead of growing with N itself.
+
+        Every pair actually within the cutoff is included exactly once, so
+        this is an *exact* sparsity reformulation of the full O(N^2) sum (the
+        excluded pairs contribute exactly zero via the cosine cutoff anyway),
+        not an approximation.
+
+        Parameters
+        ----------
+        pos : torch.Tensor
+            (Btot, N, D) positions.
+        box : Optional[torch.Tensor]
+            Passed to ``_min_image`` for PBC, or None.
+        cutoff : float
+            Neighbor cutoff distance.
+
+        Returns
+        -------
+        neighbor_idx : torch.Tensor
+            (Btot, N, K) long tensor of neighbor residue indices. Padded (for
+            residues with fewer than K neighbors) with indices of genuine,
+            non-neighbor residues -- self (j == i) is *never* selected as
+            padding (see comment below), so no NaN-gradient guard analogous
+            to ``_diag_safe`` is needed downstream.
+        neighbor_mask : torch.Tensor
+            (Btot, N, K) bool tensor, True where the corresponding
+            ``neighbor_idx`` entry is an actual (within-cutoff) neighbor,
+            False for padding.
+        """
+        Btot, N, D = pos.shape
+        device = pos.device
+        with torch.no_grad():
+            pos_d = pos.detach()
+            rij = pos_d.unsqueeze(2) - pos_d.unsqueeze(1)  # (Btot,N,N,D)
+            if box is not None:
+                rij = _min_image(rij, box)
+            r = torch.linalg.norm(rij, dim=-1)  # (Btot,N,N)
+            del rij
+            eye = torch.eye(N, dtype=torch.bool, device=device).unsqueeze(0)
+            within = (r < cutoff) & (~eye)
+            del r
+
+            counts = within.sum(dim=-1)  # (Btot,N)
+            K = max(int(counts.max().item()) if counts.numel() > 0 else 0, 1)
+
+            # Sort key: 0 = genuine neighbor, 1 = other non-neighbor, 2 = self.
+            # Taking the first K entries of this (stable) sort gives every
+            # residue's neighbors first, then pads with non-neighbors; self
+            # is forced to sort strictly last (key 2) so it can never be
+            # among the first K entries as long as K <= N-1, which always
+            # holds since K is at most the true max neighbor count (<= N-1).
+            sort_key = (~within).to(torch.int8) + eye.to(torch.int8) * 2
+            order = torch.argsort(sort_key, dim=-1, stable=True)
+            del sort_key, eye
+
+            neighbor_idx = order[..., :K]
+            neighbor_mask = torch.gather(within, -1, neighbor_idx)
+            del within, order
+
+        return neighbor_idx, neighbor_mask
+
+    @staticmethod
+    def _differentiable_zeros(pos: torch.Tensor, shape: Tuple[int, ...]) -> torch.Tensor:
+        """Returns an all-zero tensor of the given shape that is still
+        connected to ``pos`` in the autograd graph (contributing exactly zero
+        gradient) whenever ``pos`` requires grad. This mirrors the dense
+        implementation, which always computes zero *values* through a real
+        graph (e.g. via masking) rather than short-circuiting with a
+        disconnected constant -- returning a disconnected ``torch.zeros(...)``
+        for degenerate cases (N<=1, or no pairs within cutoff) would silently
+        break ``autograd.grad``/``backward`` whenever this is the only tensor
+        contributing to the loss."""
+        zero = torch.zeros(shape, device=pos.device, dtype=pos.dtype)
+        if pos.requires_grad:
+            zero = zero + 0.0 * pos.sum()
+        return zero
+
+    def _radial_features_nlist(self, pos: torch.Tensor, box: Optional[torch.Tensor]) -> torch.Tensor:
+        """pos: (Btot, N, D) -> (Btot, N, n_types*K_rad), via a cutoff-based
+        neighbor list (O(N*K) instead of O(N^2))."""
+        Btot, N, D = pos.shape
+        device, dtype = pos.device, pos.dtype
+        out_size = self.n_types * self.n_radial_basis
+        if N <= 1:
+            return self._differentiable_zeros(pos, (Btot, N, out_size))
+
+        neighbor_idx, neighbor_mask = self._build_neighbor_list(pos, box, self.radial_cutoff)
+        K = neighbor_idx.shape[-1]
+
+        batch_idx = torch.arange(Btot, device=device).view(Btot, 1, 1).expand(Btot, N, K)
+        pos_j = pos[batch_idx, neighbor_idx]  # (Btot, N, K, D), differentiable gather
+        rij = pos[:, :, None, :] - pos_j  # rij[:,i,k] = pos_i - pos_j (neighbor slot k)
+        if box is not None:
+            rij = _min_image(rij, box)
+        r = torch.linalg.norm(rij, dim=-1)  # (Btot, N, K)
+        # No _diag_safe-style perturbation is needed here: neighbor_idx never
+        # contains i itself (see _build_neighbor_list), so r is never an
+        # exact-zero self-distance and its gradient can't be NaN from that.
+        r_safe = r.clamp_min(1e-12)
+
+        fc = _cosine_cutoff(r_safe, self.radial_cutoff)
+        fc = fc.masked_fill(~neighbor_mask, 0.0)  # zero out padding slots
+
+        mu = torch.as_tensor(self.radial_centers, device=device, dtype=dtype).view(1, 1, 1, -1)
+        sigma = torch.as_tensor(self.radial_widths, device=device, dtype=dtype).view(1, 1, 1, -1)
+        gauss = torch.exp(-((r_safe.unsqueeze(-1) - mu) ** 2) / (2.0 * sigma ** 2))  # (Btot,N,K,K_rad)
+        gauss = gauss * fc.unsqueeze(-1)
+
+        # one-hot type of each gathered neighbor -> (Btot, N, K, n_types)
+        type_onehot_nb = self._type_onehot.to(device=device, dtype=dtype)[neighbor_idx]
+        # (Btot,N,K,K_rad) x (Btot,N,K,n_types) -> (Btot,N,n_types,K_rad), summed over neighbor slot
+        radial = torch.einsum("bnkr,bnkt->bntr", gauss, type_onehot_nb)
+        radial = radial.reshape(Btot, N, out_size)
+        return radial
+
+    def _angular_features_nlist(self, pos: torch.Tensor, box: Optional[torch.Tensor]) -> torch.Tensor:
+        """pos: (Btot, N, D) -> (Btot, N, n_type_pairs*K_ang), via a
+        cutoff-based neighbor list (O(N*K^2) instead of O(N^3)-ish), still
+        chunked over the central-residue axis to bound peak memory."""
+        Btot, N, D = pos.shape
+        device, dtype = pos.device, pos.dtype
+        out_size = self.n_type_pairs * self.n_angular_basis
+        if N <= 1:
+            return self._differentiable_zeros(pos, (Btot, N, out_size))
+
+        neighbor_idx, neighbor_mask = self._build_neighbor_list(pos, box, self.angular_cutoff)
+        K = neighbor_idx.shape[-1]
+        if K < 2:
+            # No residue has >=2 neighbors within angular_cutoff: no triplet
+            # (j,k) can exist, so the angular contribution is exactly zero.
+            return self._differentiable_zeros(pos, (Btot, N, out_size))
+
+        # Unordered neighbor-SLOT pairs (local indices 0..K-1). Since
+        # neighbor_idx never repeats a residue within a row (it's built from
+        # a permutation of 0..N-1), ju != ku here always maps to two
+        # genuinely distinct residues -- no j==k self-pair case can arise,
+        # mirroring the reasoning in the dense implementation but for free.
+        ju, ku = torch.triu_indices(K, K, offset=1, device=device)  # (P,), P=K*(K-1)/2
+        theta0 = torch.as_tensor(self.angular_centers, device=device, dtype=dtype).view(1, 1, 1, -1)
+        w = torch.as_tensor(self.angular_widths, device=device, dtype=dtype).view(1, 1, 1, -1)
+        type_pair_index = self._type_pair_index.to(device=device)  # (n_types, n_types)
+        residue_type_idx = self._residue_type_idx.to(device=device)  # (N,) residue -> type
+
+        chunk = max(1, self.angular_chunk_size)
+        out_chunks = []
+        for start in range(0, N, chunk):
+            end = min(start + chunk, N)
+            n_i = end - start
+
+            nb_idx_i = neighbor_idx[:, start:end, :]  # (Btot, n_i, K)
+            nb_mask_i = neighbor_mask[:, start:end, :]  # (Btot, n_i, K)
+
+            batch_idx = torch.arange(Btot, device=device).view(Btot, 1, 1).expand(Btot, n_i, K)
+            pos_nb = pos[batch_idx, nb_idx_i]  # (Btot, n_i, K, D), differentiable gather
+            dvec = pos_nb - pos[:, start:end, None, :]  # dvec[:,i,k] = pos_j - pos_i (ray from i to neighbor)
+            if box is not None:
+                dvec = _min_image(dvec, box)
+            r = torch.linalg.norm(dvec, dim=-1)  # (Btot, n_i, K)
+            r_safe = r.clamp_min(1e-12)
+            fc = _cosine_cutoff(r_safe, self.angular_cutoff).masked_fill(~nb_mask_i, 0.0)  # (Btot,n_i,K)
+
+            v1 = dvec[:, :, ju, :]  # (Btot, n_i, P, D) = dvec[i,j]
+            v2 = dvec[:, :, ku, :]  # (Btot, n_i, P, D) = dvec[i,k]
+            theta = _angle(v1, v2)  # (Btot, n_i, P)
+
+            fc_ij = fc[:, :, ju]  # (Btot, n_i, P)
+            fc_ik = fc[:, :, ku]  # (Btot, n_i, P)
+            weight = fc_ij * fc_ik  # (Btot, n_i, P); exactly 0 if either leg is padding/out-of-cutoff
+
+            gauss = torch.exp(-((theta.unsqueeze(-1) - theta0) ** 2) / (2.0 * w ** 2))  # (Btot,n_i,P,M)
+            gauss = gauss * weight.unsqueeze(-1)
+
+            actual_j = nb_idx_i[:, :, ju]  # (Btot, n_i, P), actual residue index of neighbor slot j
+            actual_k = nb_idx_i[:, :, ku]  # (Btot, n_i, P), actual residue index of neighbor slot k
+            type_j = residue_type_idx[actual_j]  # (Btot, n_i, P)
+            type_k = residue_type_idx[actual_k]  # (Btot, n_i, P)
+            pair_type_id = type_pair_index[type_j, type_k]  # (Btot, n_i, P)
+            pair_onehot = torch.nn.functional.one_hot(
+                pair_type_id, num_classes=self.n_type_pairs
+            ).to(dtype)  # (Btot, n_i, P, n_type_pairs)
+
+            # Bin by (type(j),type(k)) unordered pair -> (Btot, n_i, n_type_pairs, M)
+            binned = torch.einsum("bipm,bipq->biqm", gauss, pair_onehot)
+            out_chunks.append(binned.reshape(Btot, n_i, out_size))
+
+        return torch.cat(out_chunks, dim=1)
+
+    def _radial_features_dense(self, pos: torch.Tensor, box: Optional[torch.Tensor]) -> torch.Tensor:
+        """pos: (Btot, N, D) -> (Btot, N, n_types*K_rad). Legacy O(N^2) dense
+        implementation, kept as a fallback/reference (see
+        ``use_neighbor_list``)."""
         Btot, N, D = pos.shape
         device, dtype = pos.device, pos.dtype
         rij = _pairwise_displacements(pos, box)  # (Btot, N, N, D), rij[:,i,j] = pos_i - pos_j
@@ -392,9 +643,11 @@ class CGResidueEnergy(Transform):
         radial = radial.reshape(Btot, N, self.n_types * self.n_radial_basis)
         return radial
 
-    def _angular_features(self, pos: torch.Tensor, box: Optional[torch.Tensor]) -> torch.Tensor:
+    def _angular_features_dense(self, pos: torch.Tensor, box: Optional[torch.Tensor]) -> torch.Tensor:
         """pos: (Btot, N, D) -> (Btot, N, n_type_pairs*K_ang), chunked over the
-        central-residue axis to bound peak memory for large N."""
+        central-residue axis to bound peak memory for large N. Legacy
+        O(N^3)-ish dense implementation, kept as a fallback/reference (see
+        ``use_neighbor_list``)."""
         Btot, N, D = pos.shape
         device, dtype = pos.device, pos.dtype
         rij = _pairwise_displacements(pos, box)  # rij[:,i,j] = pos_i - pos_j
